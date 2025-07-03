@@ -755,7 +755,6 @@ class MariaDBServer:
             self.mcp.add_tool(self.delete_vector_store)
             self.mcp.add_tool(self.insert_docs_vector_store)
             self.mcp.add_tool(self.search_vector_store)
-        
         logger.info("Registered MCP tools explicitly.")
 
     # --- Async Main Server Logic ---
