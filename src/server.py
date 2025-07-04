@@ -370,7 +370,7 @@ class MariaDBServer:
             logger.warning(f"TOOL WARNING: explain_query called with invalid database_name: {database_name}")
             raise ValueError(f"Invalid database name provided: {database_name}")
         
-        # EXPLAIN 키워드를 쿼리 앞에 추가
+        # Add EXPLAIN keyword to the query
         explain_sql = f"EXPLAIN {sql_query.strip()}"
         param_tuple = tuple(parameters) if parameters is not None else None
         
@@ -393,7 +393,7 @@ class MariaDBServer:
             logger.warning(f"TOOL WARNING: explain_query_extended called with invalid database_name: {database_name}")
             raise ValueError(f"Invalid database name provided: {database_name}")
         
-        # EXPLAIN EXTENDED 키워드를 쿼리 앞에 추가
+        # Add EXPLAIN EXTENDED keyword to the query
         explain_sql = f"EXPLAIN EXTENDED {sql_query.strip()}"
         param_tuple = tuple(parameters) if parameters is not None else None
         
