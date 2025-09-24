@@ -137,12 +137,17 @@ All configuration is via environment variables (typically set in a `.env` file):
 | `DB_USER`              | MariaDB username                                       | Yes      |              |
 | `DB_PASSWORD`          | MariaDB password                                       | Yes      |              |
 | `DB_NAME`              | Default database (optional; can be set per query)      | No       |              |
+| `DB_CHARSET`           | Character set for database connection (e.g., `cp1251`) | No       | MariaDB default |
 | `MCP_READ_ONLY`        | Enforce read-only SQL mode (`true`/`false`)            | No       | `true`       |
 | `MCP_MAX_POOL_SIZE`    | Max DB connection pool size                            | No       | `10`         |
 | `EMBEDDING_PROVIDER`   | Embedding provider (`openai`/`gemini`/`huggingface`)   | No     |`None`(Disabled)|
 | `OPENAI_API_KEY`       | API key for OpenAI embeddings                          | Yes (if EMBEDDING_PROVIDER=openai) | |
 | `GEMINI_API_KEY`       | API key for Gemini embeddings                          | Yes (if EMBEDDING_PROVIDER=gemini) | |
 | `HF_MODEL`             | Open models from Huggingface                           | Yes (if EMBEDDING_PROVIDER=huggingface) | |
+| `ALLOWED_ORIGINS`      | Comma-separated list of allowed origins                | No       | Long list of allowed origins corresponding to local use of the server |
+| `ALLOWED_HOSTS`        | Comma-separated list of allowed hosts                  | No       | `localhost,127.0.0.1` |
+
+Note that if using 'http' or 'sse' as the transport, configuring authentication is important for security if you allow connections outside of localhost. Because different organizations use different authentication methods, the server does not provide a default authentication method. You will need to configure your own authentication method. Thankfully FastMCP provides a simple way to do this starting with version 2.12.1. See the [FastMCP documentation](https://gofastmcp.com/servers/auth/authentication#environment-configuration) for more information. We have provided an example configuration below.
 
 #### Example `.env` file
 
@@ -174,6 +179,21 @@ MCP_READ_ONLY=true
 MCP_MAX_POOL_SIZE=10
 ```
 
+**Example Authentication Configuration:**
+This configuration uses external web authentication via GitHub or Google. If you have internal JWT authentication (desired for organizations who manage their own services), you can use the JWT provider instead.
+
+```dotenv
+# GitHub OAuth
+export FASTMCP_SERVER_AUTH=fastmcp.server.auth.providers.github.GitHubProvider
+export FASTMCP_SERVER_AUTH_GITHUB_CLIENT_ID="Ov23li..."
+export FASTMCP_SERVER_AUTH_GITHUB_CLIENT_SECRET="github_pat_..."
+
+# Google OAuth
+export FASTMCP_SERVER_AUTH=fastmcp.server.auth.providers.google.GoogleProvider
+export FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID="123456.apps.googleusercontent.com"
+export FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET="GOCSPX-..."
+```
+
 ---
 
 ## Installation & Setup
@@ -193,17 +213,26 @@ MCP_MAX_POOL_SIZE=10
    ```
 3. **Install dependencies**
    ```bash
-   uv pip compile pyproject.toml -o uv.lock
-   ```
-   ```bash
-   uv pip sync uv.lock
+   uv lock
+   uv sync
    ```
 4. **Create `.env`** in the project root (see [Configuration](#configuration--environment-variables))
 5. **Run the server**
+   
+   **Standard Input/Output (default):**
    ```bash
-   python server.py
+   uv run server.py
    ```
-   _Adjust entry point if needed (e.g., `main.py`)_
+   
+   **SSE Transport:**
+   ```bash
+   uv run server.py --transport sse --host 127.0.0.1 --port 9001
+   ```
+   
+   **HTTP Transport (streamable HTTP):**
+   ```bash
+   uv run server.py --transport http --host 127.0.0.1 --port 9001 --path /mcp
+   ```
 
 ---
 
@@ -267,6 +296,7 @@ MCP_MAX_POOL_SIZE=10
 
 ## Integration - Claude desktop/Cursor/Windsurf/VSCode
 
+### Option 1: Direct Command (stdio)
 ```json
 {
   "mcpServers": {
@@ -283,8 +313,8 @@ MCP_MAX_POOL_SIZE=10
   }
 }
 ```
-or
-**If already running MCP server**
+
+### Option 2: SSE Transport
 ```json
 {
   "servers": {
@@ -295,6 +325,19 @@ or
   }
 }
 ```
+
+### Option 3: HTTP Transport
+```json
+{
+  "servers": {
+    "mariadb-mcp-server": {
+      "url": "http://{host}:9001/mcp",
+      "type": "streamable-http"
+    }
+  }
+}
+```
+
 ---
 
 ## Logging

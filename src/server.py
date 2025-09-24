@@ -1,7 +1,16 @@
 # server.py
+
+# Import configuration settings
+from config import (
+    DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME, DB_CHARSET,
+    MCP_READ_ONLY, MCP_MAX_POOL_SIZE, EMBEDDING_PROVIDER,
+    ALLOWED_ORIGINS, ALLOWED_HOSTS,
+    logger
+)
+
 import asyncio
-import logging
 import argparse
+import re
 from typing import List, Dict, Any, Optional
 from functools import partial 
 
@@ -9,12 +18,9 @@ import asyncmy
 import anyio 
 from fastmcp import FastMCP, Context
 
-# Import configuration settings
-from config import (
-    DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME,
-    MCP_READ_ONLY, MCP_MAX_POOL_SIZE, EMBEDDING_PROVIDER,
-    logger
-)
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 # Import EmbeddingService for vector store creation
 from embeddings import EmbeddingService
@@ -35,7 +41,7 @@ class MariaDBServer:
     def __init__(self, server_name="MariaDB_Server", autocommit=True):
         self.mcp = FastMCP(server_name)
         self.pool: Optional[asyncmy.Pool] = None
-        self.autocommit=autocommit
+        self.autocommit = not MCP_READ_ONLY
         self.is_read_only = MCP_READ_ONLY
         logger.info(f"Initializing {server_name}...")
         if self.is_read_only:
@@ -71,18 +77,25 @@ class MariaDBServer:
             return
 
         try:
-            logger.info(f"Creating connection pool for {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME} (max size: {MCP_MAX_POOL_SIZE})")
-            self.pool = await asyncmy.create_pool(
-                host=DB_HOST,
-                port=DB_PORT,
-                user=DB_USER,
-                password=DB_PASSWORD,
-                db=DB_NAME,
-                minsize=1,
-                maxsize=MCP_MAX_POOL_SIZE,
-                autocommit=self.autocommit,
-                pool_recycle=3600
-            )
+            pool_params = {
+                "host": DB_HOST,
+                "port": DB_PORT,
+                "user": DB_USER,
+                "password": DB_PASSWORD,
+                "db": DB_NAME,
+                "minsize": 1,
+                "maxsize": MCP_MAX_POOL_SIZE,
+                "autocommit": self.autocommit,
+                "pool_recycle": 3600
+            }
+            
+            if DB_CHARSET:
+                pool_params["charset"] = DB_CHARSET
+                logger.info(f"Creating connection pool for {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME} (max size: {MCP_MAX_POOL_SIZE}, charset: {DB_CHARSET})")
+            else:
+                logger.info(f"Creating connection pool for {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME} (max size: {MCP_MAX_POOL_SIZE})")
+            
+            self.pool = await asyncmy.create_pool(**pool_params)
             logger.info("Connection pool initialized successfully.")
         except AsyncMyError as e:
             logger.error(f"Failed to initialize database connection pool: {e}", exc_info=True)
@@ -113,7 +126,15 @@ class MariaDBServer:
             raise RuntimeError("Database connection pool not available.")
 
         allowed_prefixes = ('SELECT', 'SHOW', 'DESC', 'DESCRIBE', 'USE')
-        query_upper = sql.strip().upper()
+        
+        # Strip SQL comments from query
+        # Remove single-line comments (-- comment)
+        sql_no_comments = re.sub(r'--.*?$', '', sql, flags=re.MULTILINE)
+        # Remove multi-line comments (/* comment */)
+        sql_no_comments = re.sub(r'/\*.*?\*/', '', sql_no_comments, flags=re.DOTALL)
+        sql_no_comments = sql_no_comments.strip()
+        
+        query_upper = sql_no_comments.upper()
         is_allowed_read_query = any(query_upper.startswith(prefix) for prefix in allowed_prefixes)
 
         if self.is_read_only and not is_allowed_read_query:
@@ -766,22 +787,66 @@ class MariaDBServer:
              logger.error("Cannot register tools: Database pool is not initialized.")
              raise RuntimeError("Database pool must be initialized before registering tools.")
 
-        self.mcp.add_tool(self.list_databases)
-        self.mcp.add_tool(self.list_tables)
-        self.mcp.add_tool(self.get_table_schema)
-        self.mcp.add_tool(self.get_table_schema_with_relations)
-        self.mcp.add_tool(self.execute_sql)
-        self.mcp.add_tool(self.create_database)
+        @self.mcp.tool
+        async def list_databases() -> List[str]:
+            """Lists all accessible databases on the connected MariaDB server."""
+            return await self.list_databases()
+            
+        @self.mcp.tool
+        async def list_tables(database_name: str) -> List[str]:
+            """Lists all tables within the specified database."""
+            return await self.list_tables(database_name)
+            
+        @self.mcp.tool
+        async def get_table_schema(database_name: str, table_name: str) -> Dict[str, Any]:
+            """Retrieves the schema for a specific table in a database."""
+            return await self.get_table_schema(database_name, table_name)
+            
+        @self.mcp.tool
+        async def get_table_schema_with_relations(database_name: str, table_name: str) -> Dict[str, Any]:
+            """Retrieves table schema with foreign key relationship information."""
+            return await self.get_table_schema_with_relations(database_name, table_name)
+            
+        @self.mcp.tool
+        async def execute_sql(sql_query: str, database_name: str, parameters: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
+            """Executes a read-only SQL query against a specified database."""
+            return await self.execute_sql(sql_query, database_name, parameters)
+            
+        @self.mcp.tool
+        async def create_database(database_name: str) -> Dict[str, Any]:
+            """Creates a new database if it doesn't exist."""
+            return await self.create_database(database_name)
+            
         if EMBEDDING_PROVIDER is not None:
-            self.mcp.add_tool(self.create_vector_store)
-            self.mcp.add_tool(self.list_vector_stores)
-            self.mcp.add_tool(self.delete_vector_store)
-            self.mcp.add_tool(self.insert_docs_vector_store)
-            self.mcp.add_tool(self.search_vector_store)
+            @self.mcp.tool
+            async def create_vector_store(database_name: str, vector_store_name: str, model_name: Optional[str] = None, distance_function: Optional[str] = None) -> dict:
+                """Creates a table which stores embeddings."""
+                return await self.create_vector_store(database_name, vector_store_name, model_name, distance_function)
+                
+            @self.mcp.tool
+            async def list_vector_stores(database_name: str) -> List[str]:
+                """Lists all vector stores in a database."""
+                return await self.list_vector_stores(database_name)
+                
+            @self.mcp.tool
+            async def delete_vector_store(database_name: str, vector_store_name: str) -> Dict[str, Any]:
+                """Deletes a vector store from the specified database."""
+                return await self.delete_vector_store(database_name, vector_store_name)
+                
+            @self.mcp.tool
+            async def insert_docs_vector_store(database_name: str, vector_store_name: str, documents: List[str], metadata: Optional[List[dict]] = None) -> dict:
+                """Insert a batch of documents into a vector store."""
+                return await self.insert_docs_vector_store(database_name, vector_store_name, documents, metadata)
+                
+            @self.mcp.tool
+            async def search_vector_store(user_query: str, database_name: str, vector_store_name: str, k: int = 7) -> list:
+                """Search a vector store for similar documents."""
+                return await self.search_vector_store(user_query, database_name, vector_store_name, k)
+                
         logger.info("Registered MCP tools explicitly.")
 
     # --- Async Main Server Logic ---
-    async def run_async_server(self, transport="stdio", host="127.0.0.1", port=9001):
+    async def run_async_server(self, transport="stdio", host="127.0.0.1", port=9001, path="/mcp"):
         """
         Initializes pool, registers tools, and runs the appropriate async MCP listener.
         This method should be the target for anyio.run().
@@ -795,9 +860,23 @@ class MariaDBServer:
 
             # 3. Prepare transport arguments
             transport_kwargs = {}
+            if transport != "stdio":
+                middleware = [
+                    Middleware(
+                        CORSMiddleware,
+                        allow_origins=ALLOWED_ORIGINS,
+                        allow_methods=["GET", "POST"],
+                        allow_headers=["*"],
+                    ),
+                    Middleware(TrustedHostMiddleware, 
+                               allowed_hosts=ALLOWED_HOSTS)
+                ]
             if transport == "sse":
-                transport_kwargs = {"host": host, "port": port}
+                transport_kwargs = {"host": host, "port": port, "middleware": middleware}
                 logger.info(f"Starting MCP server via {transport} on {host}:{port}...")
+            elif transport == "http":
+                transport_kwargs = {"host": host, "port": port, "path": path, "middleware": middleware}
+                logger.info(f"Starting MCP server via {transport} on {host}:{port}{path}...")
             elif transport == "stdio":
                  logger.info(f"Starting MCP server via {transport}...")
             else:
@@ -820,12 +899,14 @@ class MariaDBServer:
 # --- Main Execution Block ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MariaDB MCP Server")
-    parser.add_argument('--transport', type=str, default='stdio', choices=['stdio', 'sse'],
-                        help='MCP transport protocol (stdio or sse)')
+    parser.add_argument('--transport', type=str, default='stdio', choices=['stdio', 'sse', 'http'],
+                        help='MCP transport protocol (stdio, sse, or http)')
     parser.add_argument('--host', type=str, default='127.0.0.1',
-                        help='Host for SSE transport')
+                        help='Host for SSE or HTTP transport')
     parser.add_argument('--port', type=int, default=9001,
-                        help='Port for SSE transport')
+                        help='Port for SSE or HTTP transport')
+    parser.add_argument('--path', type=str, default='/mcp',
+                        help='Path for HTTP transport (default: /mcp)')
     args = parser.parse_args()
 
     # 1. Create the server instance
@@ -835,7 +916,11 @@ if __name__ == "__main__":
     try:
         # 2. Use anyio.run to manage the event loop and call the main async server logic
         anyio.run(
-            partial(server.run_async_server, transport=args.transport, host=args.host, port=args.port)
+            partial(server.run_async_server, 
+                    transport=args.transport, 
+                    host=args.host, 
+                    port=args.port, 
+                    path=args.path)
         )
         logger.info("Server finished gracefully.")
 
